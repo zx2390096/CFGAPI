@@ -41,8 +41,7 @@ export async function onRequest(context) {
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
 
-      let previousChunk = '';  // 存储倒数第二个块
-      let lastChunk = '';     // 存储最后一个块
+      let bufferedChunk = '';  // 当前缓存的块
       
       const stream = new ReadableStream({
         async start(controller) {
@@ -51,27 +50,47 @@ export async function onRequest(context) {
               const {done, value} = await reader.read();
               
               if (done) {
-                // 在流结束时检查最后一个块是否和倒数第二个块重复
-                const lastContent = extractContent(lastChunk);
-                const prevContent = extractContent(previousChunk);
-                
-                // 只有当内容长度超过3且完全重复时才跳过最后一个块
-                if (lastContent.length > 3 && lastContent === prevContent) {
-                  // 不发送最后一个块
-                } else {
-                  // 发送最后一个块
-                  controller.enqueue(encoder.encode(lastChunk));
+                if (bufferedChunk) {
+                  controller.enqueue(encoder.encode(bufferedChunk));
                 }
                 controller.close();
                 break;
               }
 
-              const chunk = decoder.decode(value);
-              // 更新块记录
-              previousChunk = lastChunk;
-              lastChunk = chunk;
-              // 立即发送当前块
-              controller.enqueue(value);
+              const currentChunk = decoder.decode(value);
+              
+              // 检查是否包含停止标志（[DONE]）
+              if (currentChunk.includes('[DONE]')) {
+                // 提取 [DONE] 之前的内容
+                const [finalContent] = currentChunk.split('[DONE]');
+                
+                // 如果缓存的内容不为空，检查最后部分是否重复
+                if (bufferedChunk) {
+                  const prevContent = extractContent(bufferedChunk);
+                  const finalContentText = extractContent(finalContent);
+                  
+                  // 如果最后内容长度大于3且完全包含在之前的内容中，则不发送最后部分
+                  if (finalContentText.length > 3 && prevContent.endsWith(finalContentText)) {
+                    controller.enqueue(encoder.encode(bufferedChunk));
+                  } else {
+                    // 发送缓存的内容和最终内容
+                    controller.enqueue(encoder.encode(bufferedChunk + finalContent));
+                  }
+                } else {
+                  controller.enqueue(encoder.encode(finalContent));
+                }
+                
+                // 发送 [DONE] 标志
+                controller.enqueue(encoder.encode('\ndata: [DONE]\n\n'));
+                controller.close();
+                break;
+              } else {
+                // 不是最后一块，发送缓存的内容，并将当前内容存入缓存
+                if (bufferedChunk) {
+                  controller.enqueue(encoder.encode(bufferedChunk));
+                }
+                bufferedChunk = currentChunk;
+              }
             }
           } catch (error) {
             controller.error(error);
