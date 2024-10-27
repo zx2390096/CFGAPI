@@ -41,7 +41,8 @@ export async function onRequest(context) {
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
 
-      let bufferedChunk = '';  // 当前缓存的块
+      let lastContent = null;  // 存储上一次的内容
+      let buffer = '';        // 用于处理跨块的数据
       
       const stream = new ReadableStream({
         async start(controller) {
@@ -50,46 +51,60 @@ export async function onRequest(context) {
               const {done, value} = await reader.read();
               
               if (done) {
-                if (bufferedChunk) {
-                  controller.enqueue(encoder.encode(bufferedChunk));
+                // 处理缓冲区中剩余的数据
+                if (buffer) {
+                  if (buffer.startsWith('data: ')) {
+                    const data = buffer.slice(6);
+                    if (data !== '[DONE]') {
+                      try {
+                        const parsedData = JSON.parse(data);
+                        const content = extractContent(parsedData);
+                        if (!lastContent || !isRepeatContent(content, lastContent)) {
+                          controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsedData)}\n\n`));
+                        }
+                      } catch (e) {
+                        controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                      }
+                    }
+                  }
                 }
                 controller.close();
                 break;
               }
 
-              const currentChunk = decoder.decode(value);
+              buffer += decoder.decode(value);
+              const lines = buffer.split('\n');
               
-              // 检查是否包含停止标志（[DONE]）
-              if (currentChunk.includes('[DONE]')) {
-                // 提取 [DONE] 之前的内容
-                const [finalContent] = currentChunk.split('[DONE]');
-                
-                // 如果缓存的内容不为空，检查最后部分是否重复
-                if (bufferedChunk) {
-                  const prevContent = extractContent(bufferedChunk);
-                  const finalContentText = extractContent(finalContent);
-                  
-                  // 如果最后内容长度大于3且完全包含在之前的内容中，则不发送最后部分
-                  if (finalContentText.length > 3 && prevContent.endsWith(finalContentText)) {
-                    controller.enqueue(encoder.encode(bufferedChunk));
-                  } else {
-                    // 发送缓存的内容和最终内容
-                    controller.enqueue(encoder.encode(bufferedChunk + finalContent));
+              // 保留最后一行，因为它可能是不完整的
+              buffer = lines.pop() || '';
+
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  const data = line.slice(6);
+                  if (data === '[DONE]') {
+                    controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                    continue;
                   }
-                } else {
-                  controller.enqueue(encoder.encode(finalContent));
+
+                  try {
+                    const parsedData = JSON.parse(data);
+                    const content = extractContent(parsedData);
+                    
+                    // 检查是否是重复内容
+                    if (lastContent && isRepeatContent(content, lastContent)) {
+                      continue; // 跳过重复内容
+                    }
+
+                    // 更新最后发送的内容
+                    lastContent = content;
+                    
+                    // 发送数据
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsedData)}\n\n`));
+                  } catch (e) {
+                    // 如果解析失败，仍然发送原始数据
+                    controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                  }
                 }
-                
-                // 发送 [DONE] 标志
-                controller.enqueue(encoder.encode('\ndata: [DONE]\n\n'));
-                controller.close();
-                break;
-              } else {
-                // 不是最后一块，发送缓存的内容，并将当前内容存入缓存
-                if (bufferedChunk) {
-                  controller.enqueue(encoder.encode(bufferedChunk));
-                }
-                bufferedChunk = currentChunk;
               }
             }
           } catch (error) {
@@ -128,26 +143,19 @@ export async function onRequest(context) {
   }
 }
 
-// 辅助函数：从 SSE 消息中提取内容
-function extractContent(chunk) {
-  const lines = chunk.split('\n');
-  let content = '';
-  
-  for (const line of lines) {
-    if (line.startsWith('data: ')) {
-      try {
-        const data = JSON.parse(line.slice(6));
-        if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-          content += data.candidates[0].content.parts[0].text;
-        }
-      } catch (e) {
-        // 解析失败就跳过
-        continue;
-      }
-    }
+// 从响应数据中提取实际内容
+function extractContent(parsedData) {
+  try {
+    return parsedData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  } catch (e) {
+    return JSON.stringify(parsedData);
   }
-  
-  return content;
+}
+
+// 检查是否是重复内容
+function isRepeatContent(currentContent, lastContent) {
+  if (!currentContent || !lastContent) return false;
+  return lastContent.endsWith(currentContent);
 }
 
 // 处理 OPTIONS 请求
