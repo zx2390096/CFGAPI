@@ -1,10 +1,10 @@
 export async function onRequest(context) {
   try {
-    const TELEGRAPH_URL = 'https://generativelanguage.googleapis.com/v1beta';
+    const TELEGRAPH_URL = 'https://generativelanguage.googleapis.com';
     const request = context.request;
     const url = new URL(request.url);
     
-    // 构建新的 URL，保持路径部分
+    // 保持原始路径，包括 /v1beta
     const newUrl = new URL(url.pathname + url.search, TELEGRAPH_URL);
     
     const providedApiKeys = url.searchParams.get('key');
@@ -22,6 +22,9 @@ export async function onRequest(context) {
     const selectedApiKey = apiKeyArray[Math.floor(Math.random() * apiKeyArray.length)];
     newUrl.searchParams.set('key', selectedApiKey);
 
+    // 添加日志以便调试
+    console.log('Proxying request to:', newUrl.toString());
+
     const modifiedRequest = new Request(newUrl.toString(), {
       headers: request.headers,
       method: request.method,
@@ -37,10 +40,34 @@ export async function onRequest(context) {
     }
 
     const modifiedResponse = new Response(response.body, response);
+    // 设置 CORS 头
     modifiedResponse.headers.set('Access-Control-Allow-Origin', '*');
+    modifiedResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    modifiedResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+    
     return modifiedResponse;
 
   } catch (error) {
-    return new Response('An error occurred: ' + error.message, { status: 500 });
+    console.error('Proxy error:', error);
+    return new Response('An error occurred: ' + error.message, { 
+      status: 500,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'text/plain'
+      }
+    });
   }
+}
+
+// 处理 OPTIONS 请求
+export async function onRequestOptions() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '86400'
+    }
+  });
 }
